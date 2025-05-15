@@ -18,20 +18,25 @@ local SOCKET_POLL = 1000
 
 local DC_SOURCE = nil
 local SCENEITEM = nil
-local SCENEITEM_INFO_ORIG = nil
-local SCENEITEM_CROP_ORIG = nil
-local SCENEITEM_INFO = nil
+local SCENEITEM_INFO = {
+    current = nil,
+    original = nil,
+}
 local SCENEITEM_CROP = nil
-local CROP_FILTER = nil
-local CROP_FILTER_TEMP = nil
+local CROP_FILTER = {
+    conversion = nil,
+    zoom = nil,
+}
 local CROP_FILTER_SETTINGS = nil
-local CROP_FILTER_INFO_ORIG = { x = 0, y = 0, w = 0, h = 0 }
-local CROP_FILTER_INFO = { x = 0, y = 0, w = 0, h = 0 }
+local CROP_FILTER_INFO = {
+    current = { x = 0, y = 0, w = 0, h = 0 },
+    original = { x = 0, y = 0, w = 0, h = 0 },
+}
 local MONITOR_INFO = nil
 local ZOOM_INFO = {
     source_size = { width = 0, height = 0 },
     source_crop = { x = 0, y = 0, w = 0, h = 0 },
-    source_crop_filter = { x = 0, y = 0, w = 0, h = 0 },
+    crop_sums = { x = 0, y = 0, w = 0, h = 0 },
     zoom_to = 2
 }
 local ZOOM_TARGET = nil
@@ -49,6 +54,7 @@ local osx_nsevent = nil
 local osx_mouse_location = nil
 
 local SETTINGS = {
+    auto_start = true,
     dc_source_name = "",
     use_rezoom = false,
     use_auto_follow_mouse = true,
@@ -94,8 +100,6 @@ local VERSION_STR = OBS.obs_get_version_string()
 local m1, m2 = VERSION_STR:match("(%d+%.%d+)%.(%d+)")
 local VERSION_MAJOR = tonumber(m1) or 0
 local VERSION_MINOR = tonumber(m2) or 0
-
-local AUTO_START = false
 local AUTO_START_RUNNING = false
 
 -- Define the mouse cursor functions for each platform
@@ -242,8 +246,8 @@ end
 
 ---
 ---@param temp_obj any The managed OBS object
----@param delete_func function A function which deletes the packaged data (like obs.obs_data_release)
----@param callback function A function which carries the temporary object
+---@param delete_func function Thefunction which deletes the packaged data (such as obs.obs_data_release)
+---@param callback function The function which carries the temporary object
 function wrap_managed(temp_obj, delete_func, callback)
     if temp_obj == nil then
         return
@@ -287,6 +291,18 @@ function format_table(tbl, indent)
 end
 
 ---
+-- Take a shallow copy of the table
+---@param tbl any
+---@return string result The copied table
+function copy_table(tbl)
+	local res = {}
+	for k, v in pairs(tbl) do
+		res[k] = v
+	end
+	return res
+end
+
+---
 -- Linear interpolate between v0 and v1
 ---@param v0 number The start position
 ---@param v1 number The end position
@@ -318,32 +334,6 @@ end
 ---@return number result the clamped number
 function clamp(min, max, value)
     return math.max(min, math.min(max, value))
-end
----
--- Function to calculate GCD (Greatest Common Divisor)
---- @param a number
---- @param b number
-function gcd(a, b)
-    while b ~= 0 do
-        local temp = b
-        b = a % b
-        a = temp
-    end
-    return a
-end
-
----
--- Function to convert resolution to aspect ratio
---- @param width number the width of the resolution
---- @param height number the height of the resolution
---- @return number aspect_width, number aspect_height the simplified aspect ratio as two numbers
-function resolution_to_aspect_ratio(width, height)
-    -- Calculate GCD of width and height
-    local divisor = gcd(width, height)
-    -- Simplify width and height using GCD
-    local aspect_width = width / divisor
-    local aspect_height = height / divisor
-    return aspect_width, aspect_height
 end
 
 ---
@@ -390,7 +380,7 @@ function get_monitor_info(source)
     end
 
     local function calculate_info()
-        if not is_display_capture(source) then
+        if not should_use_source(source) then
             return
         end
 
@@ -455,7 +445,11 @@ end
 -- If the source_to_check is nil then the answer will be false
 ---@param source_to_check any The source to check
 ---@return boolean result True if source is a display capture, false if it nil or some other source type
-function is_display_capture(source_to_check)
+function should_use_source(source_to_check)
+    if not SETTINGS.allow_all_sources then
+        return true
+    end
+
     if source_to_check == nil then
         return false
     end
@@ -463,11 +457,6 @@ function is_display_capture(source_to_check)
     local dc_info = get_dc_info()
     if dc_info == nil then
         return false
-    end
-
-    -- Do a quick check to ensure this is a display capture
-    if not SETTINGS.allow_all_sources then
-        return true
     end
 
     local source_type = OBS.obs_source_get_id(source_to_check)
@@ -485,35 +474,23 @@ function release_sceneitem()
     ZOOM_STATE = ZoomState.None
 
     if SCENEITEM ~= nil then
-        if CROP_FILTER ~= nil and DC_SOURCE ~= nil then
+        if CROP_FILTER.zoom ~= nil and DC_SOURCE ~= nil then
             log("Zoom crop filter removed")
-            OBS.obs_source_filter_remove(DC_SOURCE, CROP_FILTER)
-            OBS.obs_source_release(CROP_FILTER)
-            CROP_FILTER = nil
+            OBS.obs_source_filter_remove(DC_SOURCE, CROP_FILTER.zoom)
+            OBS.obs_source_release(CROP_FILTER.zoom)
+            CROP_FILTER.zoom = nil
         end
 
-        if CROP_FILTER_TEMP ~= nil and DC_SOURCE ~= nil then
+        if CROP_FILTER.conversion ~= nil and DC_SOURCE ~= nil then
             log("Conversion crop filter removed")
-            OBS.obs_source_filter_remove(DC_SOURCE, CROP_FILTER_TEMP)
-            OBS.obs_source_release(CROP_FILTER_TEMP)
-            CROP_FILTER_TEMP = nil
+            OBS.obs_source_filter_remove(DC_SOURCE, CROP_FILTER.conversion)
+            OBS.obs_source_release(CROP_FILTER.conversion)
+            CROP_FILTER.conversion = nil
         end
 
         if CROP_FILTER_SETTINGS ~= nil then
             OBS.obs_data_release(CROP_FILTER_SETTINGS)
             CROP_FILTER_SETTINGS = nil
-        end
-
-        if SCENEITEM_INFO_ORIG ~= nil then
-            log("Transform info reset back to original")
-            OBS.obs_sceneitem_get_info(SCENEITEM, SCENEITEM_INFO_ORIG)
-            SCENEITEM_INFO_ORIG = nil
-        end
-
-        if SCENEITEM_CROP_ORIG ~= nil then
-            log("Transform crop reset back to original")
-            OBS.obs_sceneitem_set_crop(SCENEITEM, SCENEITEM_CROP_ORIG)
-            SCENEITEM_CROP_ORIG = nil
         end
 
         toggle_sceneitem_change_listener(false)
@@ -637,12 +614,10 @@ function refresh_sceneitem(find_newest)
         MONITOR_INFO = get_monitor_info(DC_SOURCE)
     end
 
-    local is_non_display_capture = not is_display_capture(DC_SOURCE)
-    if is_non_display_capture then
-        if not SETTINGS.use_monitor_override then
-            log("ERROR: Selected Zoom Source is not a display capture source.\n" ..
-                "       You MUST enable 'Set manual source position' and set the correct override values for size and position.")
-        end
+    local use = should_use_source(DC_SOURCE)
+    if not use and not SETTINGS.use_monitor_override then
+        log("ERROR: Selected Zoom Source is not a display capture source.\n" ..
+            "       You MUST enable 'Set manual source position' and set the correct override values for size and position.")
     end
 
     if SCENEITEM == nil then
@@ -650,25 +625,14 @@ function refresh_sceneitem(find_newest)
     end
 
     -- Capture the original settings so we can restore them later
-    SCENEITEM_INFO_ORIG = OBS.obs_transform_info()
-    OBS.obs_sceneitem_get_info(SCENEITEM, SCENEITEM_INFO_ORIG)
+    SCENEITEM_INFO.original = OBS.obs_transform_info()
+    OBS.obs_sceneitem_get_info(SCENEITEM, SCENEITEM_INFO.original)
 
-    SCENEITEM_CROP_ORIG = OBS.obs_sceneitem_crop()
-    OBS.obs_sceneitem_get_crop(SCENEITEM, SCENEITEM_CROP_ORIG)
-
-    SCENEITEM_INFO = OBS.obs_transform_info()
-    OBS.obs_sceneitem_get_info(SCENEITEM, SCENEITEM_INFO)
+    SCENEITEM_INFO.current = OBS.obs_transform_info()
+    OBS.obs_sceneitem_get_info(SCENEITEM, SCENEITEM_INFO.current)
 
     SCENEITEM_CROP = OBS.obs_sceneitem_crop()
     OBS.obs_sceneitem_get_crop(SCENEITEM, SCENEITEM_CROP)
-
-    if is_non_display_capture then
-        -- Non-Display Capture sources don't correctly report crop values
-        SCENEITEM_CROP_ORIG.left = 0
-        SCENEITEM_CROP_ORIG.top = 0
-        SCENEITEM_CROP_ORIG.right = 0
-        SCENEITEM_CROP_ORIG.bottom = 0
-    end
 
     -- Get the current source size (this will be the value after any applied crop filters)
     if not DC_SOURCE then
@@ -702,25 +666,20 @@ function refresh_sceneitem(find_newest)
 
     -- Convert the current transform into one we can correctly modify for zooming
     -- Ideally the user just has a valid one set and we don't have to change anything because this might not work 100% of the time
-    ZOOM_INFO.transform_bounds = SCENEITEM_INFO.bounds
-    if SCENEITEM_INFO.bounds_type == OBS.OBS_BOUNDS_NONE then
-        SCENEITEM_INFO.bounds_type = OBS.OBS_BOUNDS_SCALE_INNER
-        SCENEITEM_INFO.bounds_alignment = 5 -- (5 == OBS_ALIGN_TOP | OBS_ALIGN_LEFT) (0 == OBS_ALIGN_CENTER)
-        SCENEITEM_INFO.bounds.x = source_width * SCENEITEM_INFO.scale.x
-        SCENEITEM_INFO.bounds.y = source_height * SCENEITEM_INFO.scale.y
+    ZOOM_INFO.transform_bounds = SCENEITEM_INFO.current.bounds
+    SCENEITEM_INFO.current.bounds_type = OBS.OBS_BOUNDS_SCALE_OUTER
+    SCENEITEM_INFO.current.bounds_alignment = 0 -- (5 == OBS_ALIGN_TOP | OBS_ALIGN_LEFT) (0 == OBS_ALIGN_CENTER)
 
-        OBS.obs_sceneitem_set_info(SCENEITEM, SCENEITEM_INFO)
+    OBS.obs_sceneitem_set_info(SCENEITEM, SCENEITEM_INFO.current)
 
-        log("WARNING: Found existing non-boundingbox transform. This may cause issues with zooming.\n" ..
-            "         Settings have been auto converted to a bounding box scaling transfrom instead.\n" ..
-            "         If you have issues with your layout consider making the transform use a bounding box manually.")
-    end
+    log("WARNING: Found existing non-boundingbox transform. This may cause issues with zooming.\n" ..
+        "         Settings have been auto converted to a bounding box scaling transfrom instead.\n" ..
+        "         If you have issues with your layout consider making the transform use a bounding box manually.")
 
     -- Get information about any existing crop filters (that aren't ours)
-    ZOOM_INFO.source_crop_filter = { x = 0, y = 0, w = 0, h = 0 }
+    ZOOM_INFO.crop_sums = { x = 0, y = 0, w = 0, h = 0 }
     local found_crop_filter = false
-    local filters = OBS.obs_source_enum_filters(DC_SOURCE)
-    local function mutate_zoom_info(filter)
+    local function iterate_filter(crop_sums, filter)
         local id = OBS.obs_source_get_id(filter)
         if id ~= "crop_filter" then
             return false
@@ -735,58 +694,53 @@ function refresh_sceneitem(find_newest)
 
         wrap_managed(OBS.obs_source_get_settings(filter), OBS.obs_data_release, function(settings)
             if not OBS.obs_data_get_bool(settings, "relative") then
-                ZOOM_INFO.source_crop_filter.x =
-                    ZOOM_INFO.source_crop_filter.x + OBS.obs_data_get_int(settings, "left")
-                ZOOM_INFO.source_crop_filter.y =
-                    ZOOM_INFO.source_crop_filter.y + OBS.obs_data_get_int(settings, "top")
-                ZOOM_INFO.source_crop_filter.w =
-                    ZOOM_INFO.source_crop_filter.w + OBS.obs_data_get_int(settings, "cx")
-                ZOOM_INFO.source_crop_filter.h =
-                    ZOOM_INFO.source_crop_filter.h + OBS.obs_data_get_int(settings, "cy")
-                log("Found existing non-relative crop/pad filter (" ..
-                    name ..
-                    "). Applying settings " .. format_table(ZOOM_INFO.source_crop_filter))
-            else
                 log("WARNING: Found existing relative crop/pad filter (" .. name .. ").\n" ..
                     "         This will cause issues with zooming. Convert to relative settings instead.")
+                return
             end
+            crop_sums.x = crop_sums.x + OBS.obs_data_get_int(settings, "left")
+            crop_sums.y = crop_sums.y + OBS.obs_data_get_int(settings, "top")
+            crop_sums.w = crop_sums.w + OBS.obs_data_get_int(settings, "cx")
+            crop_sums.h = crop_sums.h + OBS.obs_data_get_int(settings, "cy")
+            log("Found existing non-relative crop/pad filter (" ..
+                name ..
+                "). Applying settings " .. format_table(crop_sums))
         end)
         return true
     end
 
-    if filters ~= nil then
+    wrap_managed(OBS.obs_source_enum_filters(DC_SOURCE), OBS.source_list_release, function(filters)
         for _, v in pairs(filters) do
-            if mutate_zoom_info(v) then
+            if iterate_filter(ZOOM_INFO.crop_sums, v) then
                 found_crop_filter = true
             end
         end
-        OBS.source_list_release(filters)
-    end
+    end)
 
-    -- If the user has a transform crop set, we need to convert it into a crop filter so that it works correctly with zooming
+    -- If the user has transform crops set, we need to convert it (or them) into a crop filter so that it works correctly with zooming
     -- Ideally the user does this manually and uses a crop filter instead of the transfrom crop because this might not work 100% of the time
-    if not found_crop_filter and (SCENEITEM_CROP_ORIG.left ~= 0 or SCENEITEM_CROP_ORIG.top ~= 0 or SCENEITEM_CROP_ORIG.right ~= 0 or SCENEITEM_CROP_ORIG.bottom ~= 0) then
+    if not found_crop_filter and (SCENEITEM_CROP.left ~= 0 or SCENEITEM_CROP.top ~= 0 or SCENEITEM_CROP.right ~= 0 or SCENEITEM_CROP.bottom ~= 0) then
         log("Creating new crop filter")
 
         -- Update the source size
-        source_width = source_width - (SCENEITEM_CROP_ORIG.left + SCENEITEM_CROP_ORIG.right)
-        source_height = source_height - (SCENEITEM_CROP_ORIG.top + SCENEITEM_CROP_ORIG.bottom)
+        source_width = source_width - (SCENEITEM_CROP.left + SCENEITEM_CROP.right)
+        source_height = source_height - (SCENEITEM_CROP.top + SCENEITEM_CROP.bottom)
 
         -- Update the source crop filter now that we will be using one
-        ZOOM_INFO.source_crop_filter.x = SCENEITEM_CROP_ORIG.left
-        ZOOM_INFO.source_crop_filter.y = SCENEITEM_CROP_ORIG.top
-        ZOOM_INFO.source_crop_filter.w = source_width
-        ZOOM_INFO.source_crop_filter.h = source_height
+        ZOOM_INFO.crop_sums.x = SCENEITEM_CROP.left
+        ZOOM_INFO.crop_sums.y = SCENEITEM_CROP.top
+        ZOOM_INFO.crop_sums.w = source_width
+        ZOOM_INFO.crop_sums.h = source_height
 
         -- Add a new crop filter that emulates the existing transform crop
         local settings = OBS.obs_data_create()
         OBS.obs_data_set_bool(settings, "relative", false)
-        OBS.obs_data_set_int(settings, "left", ZOOM_INFO.source_crop_filter.x)
-        OBS.obs_data_set_int(settings, "top", ZOOM_INFO.source_crop_filter.y)
-        OBS.obs_data_set_int(settings, "cx", ZOOM_INFO.source_crop_filter.w)
-        OBS.obs_data_set_int(settings, "cy", ZOOM_INFO.source_crop_filter.h)
-        CROP_FILTER_TEMP = OBS.obs_source_create_private("crop_filter", "temp_" .. CROP_FILTER_NAME, settings)
-        OBS.obs_source_filter_add(DC_SOURCE, CROP_FILTER_TEMP)
+        OBS.obs_data_set_int(settings, "left", ZOOM_INFO.crop_sums.x)
+        OBS.obs_data_set_int(settings, "top", ZOOM_INFO.crop_sums.y)
+        OBS.obs_data_set_int(settings, "cx", ZOOM_INFO.crop_sums.w)
+        OBS.obs_data_set_int(settings, "cy", ZOOM_INFO.crop_sums.h)
+        CROP_FILTER.conversion = OBS.obs_source_create_private("crop_filter", "temp_" .. CROP_FILTER_NAME, settings)
+        OBS.obs_source_filter_add(DC_SOURCE, CROP_FILTER.conversion)
         OBS.obs_data_release(settings)
 
         -- Clear out the transform crop
@@ -800,42 +754,42 @@ function refresh_sceneitem(find_newest)
             "         Settings have been auto converted to a relative crop/pad filter instead.\n" ..
             "         If you have issues with your layout consider making the filter manually.")
     elseif found_crop_filter then
-        source_width = ZOOM_INFO.source_crop_filter.w
-        source_height = ZOOM_INFO.source_crop_filter.h
+        source_width = ZOOM_INFO.crop_sums.w
+        source_height = ZOOM_INFO.crop_sums.h
     end
 
     -- Get the rest of the information needed to correctly zoom
     ZOOM_INFO.source_size = { width = source_width, height = source_height }
     ZOOM_INFO.source_crop = {
-        l = SCENEITEM_CROP_ORIG.left,
-        t = SCENEITEM_CROP_ORIG.top,
-        r = SCENEITEM_CROP_ORIG.right,
-        b = SCENEITEM_CROP_ORIG.bottom,
+        l = SCENEITEM_CROP.left,
+        t = SCENEITEM_CROP.top,
+        r = SCENEITEM_CROP.right,
+        b = SCENEITEM_CROP.bottom,
     }
     --log("Transform updated. Using following values -\n" .. format_table(zoom_info))
 
     -- Set the initial the crop filter data to match the source
-    CROP_FILTER_INFO_ORIG = { x = 0, y = 0, w = ZOOM_INFO.source_size.width, h = ZOOM_INFO.source_size.height }
-    CROP_FILTER_INFO = {
-        x = CROP_FILTER_INFO_ORIG.x,
-        y = CROP_FILTER_INFO_ORIG.y,
-        w = CROP_FILTER_INFO_ORIG.w,
-        h = CROP_FILTER_INFO_ORIG.h,
+    CROP_FILTER_INFO.original = {
+        x = 0,
+        y = 0,
+        w = ZOOM_INFO.source_size.width,
+        h = ZOOM_INFO.source_size.height,
     }
+    CROP_FILTER_INFO.current = copy_table(CROP_FILTER_INFO.original)
 
     -- Get or create our crop filter that we change during zoom
-    CROP_FILTER = OBS.obs_source_get_filter_by_name(DC_SOURCE, CROP_FILTER_NAME)
-    if CROP_FILTER == nil then
+    CROP_FILTER.zoom = OBS.obs_source_get_filter_by_name(DC_SOURCE, CROP_FILTER_NAME)
+    if CROP_FILTER.zoom == nil then
         CROP_FILTER_SETTINGS = OBS.obs_data_create()
         OBS.obs_data_set_bool(CROP_FILTER_SETTINGS, "relative", false)
-        CROP_FILTER = OBS.obs_source_create_private("crop_filter", CROP_FILTER_NAME, CROP_FILTER_SETTINGS)
-        OBS.obs_source_filter_add(DC_SOURCE, CROP_FILTER)
+        CROP_FILTER.zoom = OBS.obs_source_create_private("crop_filter", CROP_FILTER_NAME, CROP_FILTER_SETTINGS)
+        OBS.obs_source_filter_add(DC_SOURCE, CROP_FILTER.zoom)
     else
-        CROP_FILTER_SETTINGS = OBS.obs_source_get_settings(CROP_FILTER)
+        CROP_FILTER_SETTINGS = OBS.obs_source_get_settings(CROP_FILTER.zoom)
     end
 
-    OBS.obs_source_filter_set_order(DC_SOURCE, CROP_FILTER, OBS.OBS_ORDER_MOVE_BOTTOM)
-    set_crop_settings(CROP_FILTER_INFO_ORIG)
+    OBS.obs_source_filter_set_order(DC_SOURCE, CROP_FILTER.zoom, OBS.OBS_ORDER_MOVE_BOTTOM)
+    set_crop_settings(CROP_FILTER_INFO.original)
 end
 
 ---
@@ -854,8 +808,8 @@ function get_target_position(zoom_info)
     end
 
     -- Now offset the mouse by the crop top-left because if we cropped 100px off of the display clicking at 100,0 should really be the top-left 0,0
-    mouse.x = mouse.x - zoom_info.source_crop_filter.x
-    mouse.y = mouse.y - zoom_info.source_crop_filter.y
+    mouse.x = mouse.x - zoom_info.crop_sums.x
+    mouse.y = mouse.y - zoom_info.crop_sums.y
 
     -- If the source uses a different scale to the display, apply that now.
     -- This can happen with cloned sources, where it is cloning a scene that has a full screen display.
@@ -937,7 +891,7 @@ function on_toggle_zoom(pressed, force_value)
             ZOOM_TIME = 0
             LOCKED_CENTER = nil
             LOCKED_LAST_POS = nil
-            ZOOM_TARGET = { crop = CROP_FILTER_INFO_ORIG, c = SCENEITEM_CROP_ORIG }
+            ZOOM_TARGET = { crop = CROP_FILTER_INFO.original, c = SCENEITEM_CROP }
             if IS_FOLLOWING_MOUSE then
                 IS_FOLLOWING_MOUSE = false
                 log("Tracking mouse is off (due to zoom out)")
@@ -947,9 +901,7 @@ function on_toggle_zoom(pressed, force_value)
 
             log("Zooming in")
             -- To zoom in, we get a new target based on where the mouse was when zoom was clicked
-            if SETTINGS.keep_shape then
-                SETTINGS.shape_aspect = SCENEITEM_INFO.bounds.x / SCENEITEM_INFO.bounds.y
-            end
+            SETTINGS.shape_aspect = ZOOM_INFO.transform_bounds.x / ZOOM_INFO.transform_bounds.y
             ZOOM_STATE = ZoomState.ZoomingIn
             ZOOM_INFO.zoom_to = SETTINGS.zoom_value
             if SETTINGS.use_rezoom then
@@ -973,7 +925,8 @@ function on_toggle_zoom(pressed, force_value)
 end
 
 function on_timer()
-    if CROP_FILTER_INFO == nil then
+	local crop = CROP_FILTER_INFO.current
+    if crop == nil then
         return
     end
     if ZOOM_TARGET == nil then
@@ -991,11 +944,11 @@ function on_timer()
             if ZOOM_STATE == ZoomState.ZoomingIn and SETTINGS.use_auto_follow_mouse then
                 ZOOM_TARGET = get_target_position(ZOOM_INFO)
             end
-            CROP_FILTER_INFO.x = lerp(CROP_FILTER_INFO.x, ZOOM_TARGET.crop.x, ease_in_out(ZOOM_TIME))
-            CROP_FILTER_INFO.y = lerp(CROP_FILTER_INFO.y, ZOOM_TARGET.crop.y, ease_in_out(ZOOM_TIME))
-            CROP_FILTER_INFO.w = lerp(CROP_FILTER_INFO.w, ZOOM_TARGET.crop.w, ease_in_out(ZOOM_TIME))
-            CROP_FILTER_INFO.h = lerp(CROP_FILTER_INFO.h, ZOOM_TARGET.crop.h, ease_in_out(ZOOM_TIME))
-            set_crop_settings(CROP_FILTER_INFO)
+            crop.x = lerp(crop.x, ZOOM_TARGET.crop.x, ease_in_out(ZOOM_TIME))
+            crop.y = lerp(crop.y, ZOOM_TARGET.crop.y, ease_in_out(ZOOM_TIME))
+            crop.w = lerp(crop.w, ZOOM_TARGET.crop.w, ease_in_out(ZOOM_TIME))
+            crop.h = lerp(crop.h, ZOOM_TARGET.crop.h, ease_in_out(ZOOM_TIME))
+            set_crop_settings(crop)
         end
 
     -- If we are not zooming we only move the x/y to follow the mouse (width/height stay constant)
@@ -1040,16 +993,17 @@ function on_timer()
                 end
             end
 
-            if LOCKED_CENTER == nil and (ZOOM_TARGET.crop.x ~= CROP_FILTER_INFO.x or ZOOM_TARGET.crop.y ~= CROP_FILTER_INFO.y) then
-                CROP_FILTER_INFO.x = lerp(CROP_FILTER_INFO.x, ZOOM_TARGET.crop.x, SETTINGS.follow_speed)
-                CROP_FILTER_INFO.y = lerp(CROP_FILTER_INFO.y, ZOOM_TARGET.crop.y, SETTINGS.follow_speed)
-                set_crop_settings(CROP_FILTER_INFO)
+            local crop = CROP_FILTER_INFO.current
+            if LOCKED_CENTER == nil and (ZOOM_TARGET.crop.x ~= crop.x or ZOOM_TARGET.crop.y ~= crop.y) then
+                crop.x = lerp(crop.x, ZOOM_TARGET.crop.x, SETTINGS.follow_speed)
+                crop.y = lerp(crop.y, ZOOM_TARGET.crop.y, SETTINGS.follow_speed)
+                set_crop_settings(crop)
 
                 -- Check to see if the mouse has stopped moving long enough to create a new safe zone
                 if IS_FOLLOWING_MOUSE and LOCKED_CENTER == nil and LOCKED_LAST_POS ~= nil then
                     local diff = {
-                        x = math.abs(CROP_FILTER_INFO.x - ZOOM_TARGET.crop.x),
-                        y = math.abs(CROP_FILTER_INFO.y - ZOOM_TARGET.crop.y),
+                        x = math.abs(crop.x - ZOOM_TARGET.crop.x),
+                        y = math.abs(crop.y - ZOOM_TARGET.crop.y),
                         auto_x = ZOOM_TARGET.raw_center.x - LOCKED_LAST_POS.x,
                         auto_y = ZOOM_TARGET.raw_center.y - LOCKED_LAST_POS.y
                     }
@@ -1074,8 +1028,8 @@ function on_timer()
                             diff.y <= SETTINGS.follow_safezone_sensitivity) then
                         -- Make the new center the position of the current camera (which might not be the same as the mouse since we lerp towards it)
                         LOCKED_CENTER = {
-                            x = math.floor(CROP_FILTER_INFO.x + ZOOM_TARGET.crop.w * 0.5),
-                            y = math.floor(CROP_FILTER_INFO.y + ZOOM_TARGET.crop.h * 0.5)
+                            x = math.floor(crop.x + ZOOM_TARGET.crop.w * 0.5),
+                            y = math.floor(crop.y + ZOOM_TARGET.crop.h * 0.5)
                         }
                         log("Cursor stopped. Tracking locked to " .. LOCKED_CENTER.x .. ", " .. LOCKED_CENTER.y)
                     end
@@ -1093,7 +1047,7 @@ function on_timer()
     -- When we finished zooming out we remove the timer
     if ZOOM_STATE == ZoomState.ZoomingOut then
         log("Zoomed out")
-        set_crop_settings(CROP_FILTER_INFO_ORIG)
+        set_crop_settings(CROP_FILTER_INFO.original)
         ZOOM_STATE = ZoomState.None
         should_stop_timer = true
     elseif ZOOM_STATE == ZoomState.ZoomingIn then
@@ -1173,14 +1127,14 @@ function stop_server()
 end
 
 function set_crop_settings(crop)
-    if CROP_FILTER ~= nil and CROP_FILTER_SETTINGS ~= nil then
+    if CROP_FILTER.zoom ~= nil and CROP_FILTER_SETTINGS ~= nil then
         -- Call into OBS to update our crop filter with the new settings
         -- I have no idea how slow/expensive this is, so we could potentially only do it if something changes
         OBS.obs_data_set_int(CROP_FILTER_SETTINGS, "left", math.floor(crop.x))
         OBS.obs_data_set_int(CROP_FILTER_SETTINGS, "top", math.floor(crop.y))
         OBS.obs_data_set_int(CROP_FILTER_SETTINGS, "cx", math.floor(crop.w))
         OBS.obs_data_set_int(CROP_FILTER_SETTINGS, "cy", math.floor(crop.h))
-        OBS.obs_source_update(CROP_FILTER, CROP_FILTER_SETTINGS)
+        OBS.obs_source_update(CROP_FILTER.zoom, CROP_FILTER_SETTINGS)
     end
 end
 
@@ -1192,7 +1146,7 @@ function on_transition_start(t)
     ---
     -- Ensure to restart filters on scene change back
     ---
-    if SETTINGS.dc_source_name ~= "obs-zoom-to-mouse-none" and AUTO_START and not AUTO_START_RUNNING then
+    if SETTINGS.dc_source_name ~= "obs-zoom-to-mouse-none" and SETTINGS.auto_start and not AUTO_START_RUNNING then
         log("Auto starting")
         AUTO_START_RUNNING = true
         local timer_interval = math.floor(OBS.obs_get_frame_interval_ns() / 100000)
@@ -1468,7 +1422,7 @@ function script_properties()
 end
 
 function script_load(obs_settings_obj)
-    SCENEITEM_INFO_ORIG = nil
+    SCENEITEM_INFO.original = nil
 
     -- Workaround for detecting if OBS is already loaded and we were reloaded using "Reload Scripts"
     local current_scene = OBS.obs_frontend_get_current_scene()
@@ -1519,7 +1473,7 @@ function script_load(obs_settings_obj)
     SETTINGS.dc_source_name = ""
     USE_SOCKET = false
     IS_SCRIPT_LOADED = true
-    if SETTINGS.dc_source_name ~= "obs-zoom-to-mouse-none" and AUTO_START and not AUTO_START_RUNNING then
+    if SETTINGS.dc_source_name ~= "obs-zoom-to-mouse-none" and SETTINGS.auto_start and not AUTO_START_RUNNING then
         log("Auto starting")
         AUTO_START_RUNNING = true
         local timer_interval = math.floor(OBS.obs_get_frame_interval_ns() / 100000)
@@ -1528,7 +1482,7 @@ function script_load(obs_settings_obj)
 end
 
 function wait_for_auto_start()
-    if SETTINGS.dc_source_name == "obs-zoom-to-mouse-none" or not AUTO_START then
+    if SETTINGS.dc_source_name == "obs-zoom-to-mouse-none" or not SETTINGS.auto_start then
         OBS.remove_current_callback()
         AUTO_START_RUNNING = false
         log("Auto start cancelled")
