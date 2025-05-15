@@ -669,7 +669,7 @@ function refresh_sceneitem(find_newest)
     -- Ideally the user just has a valid one set and we don't have to change anything because this might not work 100% of the time
     ZOOM_INFO.transform_bounds = SCENEITEM_INFO.current.bounds
     SCENEITEM_INFO.current.bounds_type = OBS.OBS_BOUNDS_SCALE_OUTER
-    SCENEITEM_INFO.current.bounds_alignment = 0 -- (5 == OBS_ALIGN_TOP | OBS_ALIGN_LEFT) (0 == OBS_ALIGN_CENTER)
+    -- SCENEITEM_INFO.current.bounds_alignment = 0 -- (5 == OBS_ALIGN_TOP | OBS_ALIGN_LEFT) (0 == OBS_ALIGN_CENTER)
 
     OBS.obs_sceneitem_set_info(SCENEITEM, SCENEITEM_INFO.current)
 
@@ -1261,16 +1261,16 @@ function on_print_help()
         "Zoom Source: The display capture in the current scene to use for zooming\n" ..
         "Zoom Factor: How much to zoom in by\n" ..
         "Zoom Speed: The speed of the zoom in/out animation\n" ..
-        "Zoomed at OBS startup: Start OBS with source zoomed\n" ..
+        "Zoomed at OBS Startup: Start OBS with source zoomed\n" ..
         "Dynamic Aspect Ratio: Adjusst zoom aspect ratio to canvas source size\n" ..
         "Auto Follow Mouse: True to track the cursor while you are zoomed in\n" ..
         "Follow Outside Bounds: True to track the cursor even when it is outside the bounds of the source\n" ..
         "Follow Speed: The speed at which the zoomed area will follow the mouse when tracking\n" ..
         "Follow Border: The %distance from the edge of the source that will re-enable mouse tracking\n" ..
         "Lock Sensitivity: How close the tracking needs to get before it locks into position and stops tracking until you enter the follow border\n" ..
-        "Auto Lock on reverse direction: Automatically stop tracking if you reverse the direction of the mouse\n" ..
-        "Show all sources: True to allow selecting any source as the Zoom Source - You MUST set manual source position for non-display capture sources\n" ..
-        "Set manual source position: True to override the calculated x/y (topleft position), width/height (size), and scaleX/scaleY (canvas scale factor) for the selected source\n" ..
+        "Auto Lock on Reverse Direction: Automatically stop tracking if you reverse the direction of the mouse\n" ..
+        "Show All Sources: True to allow selecting any source as the Zoom Source - You MUST set manual source position for non-display capture sources\n" ..
+        "Set Manual Source Position: True to override the calculated x/y (topleft position), width/height (size), and scaleX/scaleY (canvas scale factor) for the selected source\n" ..
         "X: The coordinate of the left most pixel of the source\n" ..
         "Y: The coordinate of the top most pixel of the source\n" ..
         "Width: The width of the source (in pixels)\n" ..
@@ -1319,9 +1319,9 @@ function script_properties()
     -- Add the rest of the settings UI
     local zoom = OBS.obs_properties_add_float(props, "zoom_value", "Zoom Factor", 1, 5, 0.5)
     local zoom_speed = OBS.obs_properties_add_float_slider(props, "zoom_speed", "Zoom Speed", 0.01, 1, 0.01)
-    local rezoom = OBS.obs_properties_add_bool(props, "follow", "Adjust zoom factor to transform ")
+    local rezoom = OBS.obs_properties_add_bool(props, "rezoom", "Adjust Zoom Factor to Transform")
 
-    local auto_start = OBS.obs_properties_add_bool(props, "auto_start", "Zoomed at OBS startup ")
+    local auto_start = OBS.obs_properties_add_bool(props, "auto_start", "Zoomed at OBS Startup")
     OBS.obs_property_set_long_description(auto_start,
         "When enabled, auto zoom is activated on OBS start up as soon as possible")
 
@@ -1329,7 +1329,7 @@ function script_properties()
     OBS.obs_property_set_long_description(keep_shape,
         "When enabled, zoom will follow the aspect ratio of source in canvas")
 
-    local follow = OBS.obs_properties_add_bool(props, "follow", "Auto Follow Mouse ")
+    local follow = OBS.obs_properties_add_bool(props, "follow", "Auto Follow Mouse")
     OBS.obs_property_set_long_description(follow,
         "When enabled mouse traking will auto-start when zoomed in without waiting for tracking toggle hotkey")
 
@@ -1337,17 +1337,17 @@ function script_properties()
     OBS.obs_property_set_long_description(follow_outside_bounds,
         "When enabled, the mouse will be tracked even when the cursor is outside the bounds of the zoom source")
 
-    local clamp_to_edges = OBS.obs_properties_add_bool(props, "clamp_to_edges", "Clamp to Display Edge ")
+    local clamp_to_edges = OBS.obs_properties_add_bool(props, "clamp_to_edges", "Clamp to Display Edge")
     local follow_speed = OBS.obs_properties_add_float_slider(props, "follow_speed", "Follow Speed", 0.01, 1, 0.01)
     local follow_border = OBS.obs_properties_add_int_slider(props, "follow_border", "Follow Border", 0, 50, 1)
     local safezone_sense = OBS.obs_properties_add_int_slider(props, "follow_safezone_sensitivity", "Lock Sensitivity", 1, 20, 1)
-    local follow_auto_lock = OBS.obs_properties_add_bool(props, "follow_auto_lock", "Auto Lock on reverse direction ")
+    local follow_auto_lock = OBS.obs_properties_add_bool(props, "follow_auto_lock", "Auto Lock on Reverse Direction")
 
     OBS.obs_property_set_long_description(follow_auto_lock,
         "When enabled moving the mouse to edge of the zoom source will begin tracking,\n" ..
         "but moving back towards the center will stop tracking simliar to panning the camera in a RTS game")
 
-    local allow_all = OBS.obs_properties_add_bool(props, "allow_all_sources", "Allow any zoom source ")
+    local allow_all = OBS.obs_properties_add_bool(props, "allow_all_sources", "Allow Any Zoom Source ")
     OBS.obs_property_set_long_description(allow_all, "Enable to allow selecting any source as the Zoom Source\n" ..
         "You MUST set manual source position for non-display capture sources")
 
@@ -1361,7 +1361,7 @@ function script_properties()
     local override_sy = OBS.obs_properties_add_float(override_props, "monitor_override_sy", "Scale Y ", 0, 100, 0.01)
     local override_dw = OBS.obs_properties_add_int(override_props, "monitor_override_dw", "Monitor Width ", 0, 10000, 1)
     local override_dh = OBS.obs_properties_add_int(override_props, "monitor_override_dh", "Monitor Height ", 0, 10000, 1)
-    local override = OBS.obs_properties_add_group(props, "USE_MONITOR_OVERRIDE", "Set manual source position ",
+    local override = OBS.obs_properties_add_group(props, "USE_MONITOR_OVERRIDE", "Set Manual Source Position",
         OBS.OBS_GROUP_CHECKABLE, override_props)
 
     OBS.obs_property_set_long_description(override_label,
@@ -1375,16 +1375,16 @@ function script_properties()
         local socket_props = OBS.obs_properties_create()
         local r_label = OBS.obs_properties_add_text(socket_props, "socket_label", "", OBS.OBS_TEXT_INFO)
         local r_port = OBS.obs_properties_add_int(socket_props, "socket_port", "Port ", 1024, 65535, 1)
-        local r_poll = OBS.obs_properties_add_int(socket_props, "socket_poll", "Poll Delay (ms) ", 0, 1000, 1)
-        local socket = OBS.obs_properties_add_group(props, "use_socket", "Enable remote mouse listener ",
+        local r_poll = OBS.obs_properties_add_int(socket_props, "socket_poll", "Poll Delay (ms)", 0, 1000, 1)
+        local socket = OBS.obs_properties_add_group(props, "use_socket", "Enable Remote Mouse Listener",
             OBS.OBS_GROUP_CHECKABLE, socket_props)
 
         OBS.obs_property_set_long_description(r_label,
             "When enabled a UDP socket server will listen for mouse position messages from a remote client")
         OBS.obs_property_set_long_description(r_port,
-            "You must restart the server after changing the port (Uncheck then re-check 'Enable remote mouse listener')")
+            "You must restart the server after changing the port (Uncheck then re-check 'Enable Remote Mouse Listener')")
         OBS.obs_property_set_long_description(r_poll,
-            "You must restart the server after changing the poll delay (Uncheck then re-check 'Enable remote mouse listener')")
+            "You must restart the server after changing the poll delay (Uncheck then re-check 'Enable Remote Mouse Listener')")
 
         OBS.obs_property_set_visible(r_label, not USE_SOCKET)
         OBS.obs_property_set_visible(r_port, USE_SOCKET)
@@ -1399,7 +1399,7 @@ function script_properties()
 
     local debug = OBS.obs_properties_add_bool(props, "debug_logs", "Enable debug logging ")
     OBS.obs_property_set_long_description(debug,
-        "When enabled the script will output diagnostics messages to the script log (useful for debugging/github issues)")
+        "When enabled the script will output diagnostics messages to the script log (useful for debugging or GitHub issues)")
 
     OBS.obs_property_set_visible(override_label, not SETTINGS.use_monitor_override)
     OBS.obs_property_set_visible(override_x, SETTINGS.use_monitor_override)
@@ -1428,8 +1428,8 @@ function script_load(obs_settings_obj)
 
     -- Add our hotkey
     HOTKEYS = {
-        zoom = OBS.obs_hotkey_register_frontend("toggle_zoom_hotkey", "Toggle zoom to mouse", on_toggle_zoom),
-        follow = OBS.obs_hotkey_register_frontend("toggle_follow_hotkey", "Toggle follow mouse during zoom", on_toggle_follow),
+        zoom = OBS.obs_hotkey_register_frontend("toggle_zoom_hotkey", "Toggle Zoom To Mouse", on_toggle_zoom),
+        follow = OBS.obs_hotkey_register_frontend("toggle_follow_hotkey", "Toggle Follow Mouse During Zoom", on_toggle_follow),
     }
 
     -- Attempt to reload existing hotkey bindings if we can find any
