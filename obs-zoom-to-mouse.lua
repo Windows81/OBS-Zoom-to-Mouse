@@ -58,7 +58,8 @@ local SETTINGS = {
     dc_source_name = "",
     use_rezoom = false,
     use_auto_follow_mouse = true,
-    use_follow_outside_bounds = false,
+    follow_outside_bounds = false,
+    clamp_to_edges = true,
     is_following_mouse = false,
     follow_speed = 0.1,
     follow_border = 0,
@@ -797,27 +798,27 @@ end
 ---@param zoom_info any
 ---@return table
 function get_target_position(zoom_info)
-    local mouse = get_mouse_pos()
+    local mouse_pos = get_mouse_pos()
 
     -- If we have monitor information then we can offset the mouse by the top-left of the monitor position
     -- This is because the display-capture source assumes top-left is 0,0 but the mouse uses the total desktop area,
     -- so a second monitor might start at x:1920, y:0 for example, so when we click at 1920,0 we want it to look like we clicked 0,0 on the source.
     if MONITOR_INFO then
-        mouse.x = mouse.x - MONITOR_INFO.x
-        mouse.y = mouse.y - MONITOR_INFO.y
+        mouse_pos.x = mouse_pos.x - MONITOR_INFO.x
+        mouse_pos.y = mouse_pos.y - MONITOR_INFO.y
     end
 
     -- Now offset the mouse by the crop top-left because if we cropped 100px off of the display clicking at 100,0 should really be the top-left 0,0
-    mouse.x = mouse.x - zoom_info.crop_sums.x
-    mouse.y = mouse.y - zoom_info.crop_sums.y
+    mouse_pos.x = mouse_pos.x - zoom_info.crop_sums.x
+    mouse_pos.y = mouse_pos.y - zoom_info.crop_sums.y
 
     -- If the source uses a different scale to the display, apply that now.
     -- This can happen with cloned sources, where it is cloning a scene that has a full screen display.
     -- The display will be the full desktop pixel size, but the cloned scene will be scaled down to the canvas,
     -- so we need to scale down the mouse movement to match
     if MONITOR_INFO and MONITOR_INFO.scale_x and MONITOR_INFO.scale_y then
-        mouse.x = mouse.x * MONITOR_INFO.scale_x
-        mouse.y = mouse.y * MONITOR_INFO.scale_y
+        mouse_pos.x = mouse_pos.x * MONITOR_INFO.scale_x
+        mouse_pos.y = mouse_pos.y * MONITOR_INFO.scale_y
     end
 
     -- Get the new size after we zoom
@@ -835,8 +836,8 @@ function get_target_position(zoom_info)
 
     -- New offset for the crop/pad filter is whereever we clicked minus half the size, so that the clicked point because the new center
     local pos = {
-        x = mouse.x - new_size.width * 0.5,
-        y = mouse.y - new_size.height * 0.5,
+        x = mouse_pos.x - new_size.width * 0.5,
+        y = mouse_pos.y - new_size.height * 0.5,
     }
 
     -- Create the full crop results
@@ -848,12 +849,14 @@ function get_target_position(zoom_info)
     }
 
     -- Keep the zoom in bounds of the source so that we never show something outside that user is trying to hide with existing crop settings
-    crop.x = math.floor(clamp(0, (zoom_info.source_size.width - new_size.width), crop.x))
-    crop.y = math.floor(clamp(0, (zoom_info.source_size.height - new_size.height), crop.y))
+    if SETTINGS.clamp_to_edges then
+        crop.x = math.floor(clamp(0, (zoom_info.source_size.width - new_size.width), crop.x))
+        crop.y = math.floor(clamp(0, (zoom_info.source_size.height - new_size.height), crop.y))
+    end
 
     return {
         crop = crop, 
-        raw_center = mouse, 
+        raw_center = mouse_pos,
         clamped_center = {
              x = math.floor(crop.x + crop.w * 0.5), 
              y = math.floor(crop.y + crop.h * 0.5),
@@ -950,13 +953,13 @@ function on_timer()
             crop.h = lerp(crop.h, ZOOM_TARGET.crop.h, ease_in_out(ZOOM_TIME))
             set_crop_settings(crop)
         end
-
+   
     -- If we are not zooming we only move the x/y to follow the mouse (width/height stay constant)
     elseif IS_FOLLOWING_MOUSE then
         ZOOM_TARGET = get_target_position(ZOOM_INFO)
 
         local skip_frame = false
-        if not SETTINGS.use_follow_outside_bounds then
+        if not SETTINGS.follow_outside_bounds then
             if ZOOM_TARGET.raw_center.x < ZOOM_TARGET.crop.x or
                 ZOOM_TARGET.raw_center.x > ZOOM_TARGET.crop.x + ZOOM_TARGET.crop.w or
                 ZOOM_TARGET.raw_center.y < ZOOM_TARGET.crop.y or
@@ -1059,13 +1062,6 @@ function on_timer()
         if SETTINGS.use_auto_follow_mouse then
             IS_FOLLOWING_MOUSE = true
             log("Tracking mouse is " .. (IS_FOLLOWING_MOUSE and "on" or "off") .. " (due to auto follow)")
-        end
-
-        -- We set the current position as the center for the follow safezone
-        if IS_FOLLOWING_MOUSE and SETTINGS.follow_border < 50 then
-            ZOOM_TARGET = get_target_position(ZOOM_INFO)
-            LOCKED_CENTER = { x = ZOOM_TARGET.clamped_center.x, y = ZOOM_TARGET.clamped_center.y }
-            log("Cursor stopped. Tracking locked to " .. LOCKED_CENTER.x .. ", " .. LOCKED_CENTER.y)
         end
     end
 
@@ -1267,8 +1263,8 @@ function on_print_help()
         "Zoom Speed: The speed of the zoom in/out animation\n" ..
         "Zoomed at OBS startup: Start OBS with source zoomed\n" ..
         "Dynamic Aspect Ratio: Adjusst zoom aspect ratio to canvas source size\n" ..
-        "Auto follow mouse: True to track the cursor while you are zoomed in\n" ..
-        "Follow outside bounds: True to track the cursor even when it is outside the bounds of the source\n" ..
+        "Auto Follow Mouse: True to track the cursor while you are zoomed in\n" ..
+        "Follow Outside Bounds: True to track the cursor even when it is outside the bounds of the source\n" ..
         "Follow Speed: The speed at which the zoomed area will follow the mouse when tracking\n" ..
         "Follow Border: The %distance from the edge of the source that will re-enable mouse tracking\n" ..
         "Lock Sensitivity: How close the tracking needs to get before it locks into position and stops tracking until you enter the follow border\n" ..
@@ -1333,14 +1329,15 @@ function script_properties()
     OBS.obs_property_set_long_description(keep_shape,
         "When enabled, zoom will follow the aspect ratio of source in canvas")
 
-    local follow = OBS.obs_properties_add_bool(props, "follow", "Auto follow mouse ")
+    local follow = OBS.obs_properties_add_bool(props, "follow", "Auto Follow Mouse ")
     OBS.obs_property_set_long_description(follow,
         "When enabled mouse traking will auto-start when zoomed in without waiting for tracking toggle hotkey")
 
-    local follow_outside_bounds = OBS.obs_properties_add_bool(props, "follow_outside_bounds", "Follow outside bounds ")
+    local follow_outside_bounds = OBS.obs_properties_add_bool(props, "follow_outside_bounds", "Follow Outside Bounds ")
     OBS.obs_property_set_long_description(follow_outside_bounds,
-        "When enabled the mouse will be tracked even when the cursor is outside the bounds of the zoom source")
+        "When enabled, the mouse will be tracked even when the cursor is outside the bounds of the zoom source")
 
+    local clamp_to_edges = OBS.obs_properties_add_bool(props, "clamp_to_edges", "Clamp to Display Edge ")
     local follow_speed = OBS.obs_properties_add_float_slider(props, "follow_speed", "Follow Speed", 0.01, 1, 0.01)
     local follow_border = OBS.obs_properties_add_int_slider(props, "follow_border", "Follow Border", 0, 50, 1)
     local safezone_sense = OBS.obs_properties_add_int_slider(props, "follow_safezone_sensitivity", "Lock Sensitivity", 1, 20, 1)
@@ -1577,7 +1574,8 @@ function settings_update(obs_settings_obj)
         zoom_value = OBS.obs_data_get_double(obs_settings_obj, "zoom_value"),
         zoom_speed = OBS.obs_data_get_double(obs_settings_obj, "zoom_speed"),
         use_auto_follow_mouse = OBS.obs_data_get_bool(obs_settings_obj, "follow"),
-        use_follow_outside_bounds = OBS.obs_data_get_bool(obs_settings_obj, "follow_outside_bounds"),
+        follow_outside_bounds = OBS.obs_data_get_bool(obs_settings_obj, "follow_outside_bounds"),
+        clamp_to_edges = OBS.obs_data_get_bool(obs_settings_obj, "clamp_to_edges"),
         follow_speed = OBS.obs_data_get_double(obs_settings_obj, "follow_speed"),
         follow_border = OBS.obs_data_get_int(obs_settings_obj, "follow_border"),
         follow_safezone_sensitivity = OBS.obs_data_get_int(obs_settings_obj, "follow_safezone_sensitivity"),
