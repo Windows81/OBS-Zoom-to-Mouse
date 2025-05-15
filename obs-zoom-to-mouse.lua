@@ -296,11 +296,11 @@ end
 ---@param tbl any
 ---@return string result The copied table
 function copy_table(tbl)
-	local res = {}
-	for k, v in pairs(tbl) do
-		res[k] = v
-	end
-	return res
+    local res = {}
+    for k, v in pairs(tbl) do
+        res[k] = v
+    end
+    return res
 end
 
 ---
@@ -342,7 +342,6 @@ end
 ---@param source any The OBS source
 ---@return table|nil monitor_info The monitor size/top-left point
 function get_monitor_info(source)
-
     if SETTINGS.use_monitor_override then
         return {
             x = SETTINGS.monitor_override_x,
@@ -396,7 +395,7 @@ function get_monitor_info(source)
                 return
             end
 
-            local found = wrap_managed(OBS.obs_source_get_settings(source), OBS.obs_data_release, function()
+            local found = wrap_managed(OBS.obs_source_get_settings(source), OBS.obs_data_release, function(settings)
                 return find_display_name(dc_info, settings, monitor_id_prop)
             end)
 
@@ -821,12 +820,22 @@ function get_target_position(zoom_info)
         mouse_pos.y = mouse_pos.y * MONITOR_INFO.scale_y
     end
 
+    local zoom_factor = zoom_info.zoom_to
+    if MONITOR_INFO then
+    log(string.format("%f", math.max(
+        (ZOOM_INFO.transform_bounds.x / MONITOR_INFO.width),
+        (ZOOM_INFO.transform_bounds.y / MONITOR_INFO.height))))
+        zoom_factor = zoom_factor / math.max(
+            (ZOOM_INFO.transform_bounds.x / MONITOR_INFO.width),
+            (ZOOM_INFO.transform_bounds.y / MONITOR_INFO.height))
+    end
+
     -- Get the new size after we zoom
     -- Remember that because we are using a crop/pad filter making the size smaller (dividing by zoom) means that we see less of the image
     -- in the same amount of space making it look bigger (aka zoomed in)
     local new_size = {
-        width = zoom_info.source_size.width / zoom_info.zoom_to,
-        height = zoom_info.source_size.height / zoom_info.zoom_to,
+        width = zoom_info.source_size.width / zoom_factor,
+        height = zoom_info.source_size.height / zoom_factor,
     }
 
     -- If should keep shape, use aspect ratio to get new width
@@ -907,11 +916,6 @@ function on_toggle_zoom(pressed, force_value)
             SETTINGS.shape_aspect = ZOOM_INFO.transform_bounds.x / ZOOM_INFO.transform_bounds.y
             ZOOM_STATE = ZoomState.ZoomingIn
             ZOOM_INFO.zoom_to = SETTINGS.zoom_value
-            if SETTINGS.use_rezoom then
-                ZOOM_INFO.zoom_to = ZOOM_INFO.zoom_to / math.min(
-                    (ZOOM_INFO.transform_bounds.x / MONITOR_INFO.width),
-                    (ZOOM_INFO.transform_bounds.y / MONITOR_INFO.height))
-            end
             ZOOM_TIME = 0
             LOCKED_CENTER = nil
             LOCKED_LAST_POS = nil
@@ -928,7 +932,7 @@ function on_toggle_zoom(pressed, force_value)
 end
 
 function on_timer()
-	local crop = CROP_FILTER_INFO.current
+    local crop = CROP_FILTER_INFO.current
     if crop == nil then
         return
     end
@@ -1319,7 +1323,7 @@ function script_properties()
     -- Add the rest of the settings UI
     local zoom = OBS.obs_properties_add_float(props, "zoom_value", "Zoom Factor", 1, 5, 0.5)
     local zoom_speed = OBS.obs_properties_add_float_slider(props, "zoom_speed", "Zoom Speed", 0.01, 1, 0.01)
-    local rezoom = OBS.obs_properties_add_bool(props, "rezoom", "Adjust Zoom Factor to Transform")
+    local rezoom = OBS.obs_properties_add_bool(props, "use_rezoom", "Adjust Zoom Factor to Transform")
 
     local auto_start = OBS.obs_properties_add_bool(props, "auto_start", "Zoomed at OBS Startup")
     OBS.obs_property_set_long_description(auto_start,
