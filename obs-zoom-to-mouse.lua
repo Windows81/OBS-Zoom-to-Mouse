@@ -70,6 +70,8 @@ local SETTINGS = {
     monitor_override_sy = 0,
     monitor_override_dw = 0,
     monitor_override_dh = 0,
+    keep_shape = false,
+    shape_aspect = 1,
     use_socket = false,
     socket_port = 0,
     socket_poll = 1000,
@@ -86,17 +88,15 @@ local ZoomState = {
     ZoomedIn = 3,
 }
 local ZOOM_STATE = ZoomState.None
+local ZOOM_TIME = 0
 
 local VERSION_STR = OBS.obs_get_version_string()
 local m1, m2 = VERSION_STR:match("(%d+%.%d+)%.(%d+)")
 local VERSION_MAJOR = tonumber(m1) or 0
 local VERSION_MINOR = tonumber(m2) or 0
 
-local KEEP_SHAPE = false
 local AUTO_START = false
 local AUTO_START_RUNNING = false
-local ASPECT_RATIO_W = 1
-local ASPECT_RATIO_H = 1
 
 -- Define the mouse cursor functions for each platform
 if FFI.os == "Windows" then
@@ -840,9 +840,9 @@ end
 
 ---
 -- Get the target position that we will attempt to zoom towards
----@param zoom any
+---@param zoom_info any
 ---@return table
-function get_target_position(zoom)
+function get_target_position(zoom_info)
     local mouse = get_mouse_pos()
 
     -- If we have monitor information then we can offset the mouse by the top-left of the monitor position
@@ -854,8 +854,8 @@ function get_target_position(zoom)
     end
 
     -- Now offset the mouse by the crop top-left because if we cropped 100px off of the display clicking at 100,0 should really be the top-left 0,0
-    mouse.x = mouse.x - zoom.source_crop_filter.x
-    mouse.y = mouse.y - zoom.source_crop_filter.y
+    mouse.x = mouse.x - zoom_info.source_crop_filter.x
+    mouse.y = mouse.y - zoom_info.source_crop_filter.y
 
     -- If the source uses a different scale to the display, apply that now.
     -- This can happen with cloned sources, where it is cloning a scene that has a full screen display.
@@ -870,14 +870,14 @@ function get_target_position(zoom)
     -- Remember that because we are using a crop/pad filter making the size smaller (dividing by zoom) means that we see less of the image
     -- in the same amount of space making it look bigger (aka zoomed in)
     local new_size = {
-        width = (
-            --  if should keep shape, use aspect ratio to get new width
-            KEEP_SHAPE and (zoom.source_size.height * (ASPECT_RATIO_W / ASPECT_RATIO_H))
-            --  else use source resolution
-            or zoom.source_size.width
-        ) / zoom.zoom_to,
-        height = zoom.source_size.height / zoom.zoom_to,
+        width = zoom_info.source_size.width / zoom_info.zoom_to,
+        height = zoom_info.source_size.height / zoom_info.zoom_to,
     }
+
+    -- If should keep shape, use aspect ratio to get new width
+    if SETTINGS.keep_shape then
+        new_size.width = new_size.height * SETTINGS.shape_aspect
+    end
 
     -- New offset for the crop/pad filter is whereever we clicked minus half the size, so that the clicked point because the new center
     local pos = {
@@ -894,8 +894,8 @@ function get_target_position(zoom)
     }
 
     -- Keep the zoom in bounds of the source so that we never show something outside that user is trying to hide with existing crop settings
-    crop.x = math.floor(clamp(0, (zoom.source_size.width - new_size.width), crop.x))
-    crop.y = math.floor(clamp(0, (zoom.source_size.height - new_size.height), crop.y))
+    crop.x = math.floor(clamp(0, (zoom_info.source_size.width - new_size.width), crop.x))
+    crop.y = math.floor(clamp(0, (zoom_info.source_size.height - new_size.height), crop.y))
 
     return {
         crop = crop, 
@@ -934,7 +934,7 @@ function on_toggle_zoom(pressed, force_value)
             log("Zooming out")
             -- To zoom out, we set the target back to whatever it was originally
             ZOOM_STATE = ZoomState.ZoomingOut
-            SETTINGS.zoom_time = 0
+            ZOOM_TIME = 0
             LOCKED_CENTER = nil
             LOCKED_LAST_POS = nil
             ZOOM_TARGET = { crop = CROP_FILTER_INFO_ORIG, c = SCENEITEM_CROP_ORIG }
@@ -947,9 +947,8 @@ function on_toggle_zoom(pressed, force_value)
 
             log("Zooming in")
             -- To zoom in, we get a new target based on where the mouse was when zoom was clicked
-            if KEEP_SHAPE then
-                --[[ASPECT_RATIO_W, ASPECT_RATIO_H =
-                    resolution_to_aspect_ratio(SCENEITEM_INFO.bounds.x, SCENEITEM_INFO.bounds.y)]]
+            if SETTINGS.keep_shape then
+                SETTINGS.shape_aspect = SCENEITEM_INFO.bounds.x / SCENEITEM_INFO.bounds.y
             end
             ZOOM_STATE = ZoomState.ZoomingIn
             ZOOM_INFO.zoom_to = SETTINGS.zoom_value
@@ -958,7 +957,7 @@ function on_toggle_zoom(pressed, force_value)
                     (ZOOM_INFO.transform_bounds.x / MONITOR_INFO.width),
                     (ZOOM_INFO.transform_bounds.y / MONITOR_INFO.height))
             end
-            SETTINGS.zoom_time = 0
+            ZOOM_TIME = 0
             LOCKED_CENTER = nil
             LOCKED_LAST_POS = nil
             ZOOM_TARGET = get_target_position(ZOOM_INFO)
@@ -982,20 +981,20 @@ function on_timer()
     end
 
     -- Update our zoom time that we use for the animation
-    SETTINGS.zoom_time = SETTINGS.zoom_time + SETTINGS.zoom_speed
+    ZOOM_TIME = ZOOM_TIME + SETTINGS.zoom_speed
 
     if ZOOM_STATE == ZoomState.ZoomingOut or ZOOM_STATE == ZoomState.ZoomingIn then
         -- When we are doing a zoom animation (in or out) we linear interpolate the crop to the target
-        if SETTINGS.zoom_time <= 1 then
+        if ZOOM_TIME <= 1 then
             -- If we have auto-follow turned on, make sure to keep the mouse in the view while we zoom
             -- This is incase the user is moving the mouse a lot while the animation (which may be slow) is playing
             if ZOOM_STATE == ZoomState.ZoomingIn and SETTINGS.use_auto_follow_mouse then
                 ZOOM_TARGET = get_target_position(ZOOM_INFO)
             end
-            CROP_FILTER_INFO.x = lerp(CROP_FILTER_INFO.x, ZOOM_TARGET.crop.x, ease_in_out(SETTINGS.zoom_time))
-            CROP_FILTER_INFO.y = lerp(CROP_FILTER_INFO.y, ZOOM_TARGET.crop.y, ease_in_out(SETTINGS.zoom_time))
-            CROP_FILTER_INFO.w = lerp(CROP_FILTER_INFO.w, ZOOM_TARGET.crop.w, ease_in_out(SETTINGS.zoom_time))
-            CROP_FILTER_INFO.h = lerp(CROP_FILTER_INFO.h, ZOOM_TARGET.crop.h, ease_in_out(SETTINGS.zoom_time))
+            CROP_FILTER_INFO.x = lerp(CROP_FILTER_INFO.x, ZOOM_TARGET.crop.x, ease_in_out(ZOOM_TIME))
+            CROP_FILTER_INFO.y = lerp(CROP_FILTER_INFO.y, ZOOM_TARGET.crop.y, ease_in_out(ZOOM_TIME))
+            CROP_FILTER_INFO.w = lerp(CROP_FILTER_INFO.w, ZOOM_TARGET.crop.w, ease_in_out(ZOOM_TIME))
+            CROP_FILTER_INFO.h = lerp(CROP_FILTER_INFO.h, ZOOM_TARGET.crop.h, ease_in_out(ZOOM_TIME))
             set_crop_settings(CROP_FILTER_INFO)
         end
 
@@ -1086,7 +1085,7 @@ function on_timer()
     end
 
     -- Check to see if the animation is still running
-    if SETTINGS.zoom_time < 1 then
+    if ZOOM_TIME < 1 then
         return
     end
 
@@ -1202,12 +1201,12 @@ function on_transition_start(t)
 end
 
 function on_transform_update()
-    if KEEP_SHAPE then
+    if SETTINGS.keep_shape then
         if ZOOM_STATE == ZoomState.ZoomedIn then
             -- Perform zoom again
             ZOOM_STATE = ZoomState.ZoomingIn
             ZOOM_INFO.zoom_to = SETTINGS.zoom_value
-            SETTINGS.zoom_time = 0
+            ZOOM_TIME = 0
             ZOOM_TARGET = get_target_position(ZOOM_INFO)
         end
     end
@@ -1257,12 +1256,12 @@ function on_update_transform()
     return true
 end
 
-function on_settings_modified(props, prop, settings)
+function on_settings_modified(props, prop, obs_settings_obj)
     local name = OBS.obs_property_name(prop)
 
     -- Show/Hide the settings based on if the checkbox is checked or not
     if name == "USE_MONITOR_OVERRIDE" then
-        local visible = OBS.obs_data_get_bool(settings, "USE_MONITOR_OVERRIDE")
+        local visible = OBS.obs_data_get_bool(obs_settings_obj, "USE_MONITOR_OVERRIDE")
         OBS.obs_property_set_visible(OBS.obs_properties_get(props, "monitor_override_label"), not visible)
         OBS.obs_property_set_visible(OBS.obs_properties_get(props, "monitor_override_x"), visible)
         OBS.obs_property_set_visible(OBS.obs_properties_get(props, "monitor_override_y"), visible)
@@ -1274,7 +1273,7 @@ function on_settings_modified(props, prop, settings)
         OBS.obs_property_set_visible(OBS.obs_properties_get(props, "monitor_override_dh"), visible)
         return true
     elseif name == "use_socket" then
-        local visible = OBS.obs_data_get_bool(settings, "use_socket")
+        local visible = OBS.obs_data_get_bool(obs_settings_obj, "use_socket")
         OBS.obs_property_set_visible(OBS.obs_properties_get(props, "socket_label"), not visible)
         OBS.obs_property_set_visible(OBS.obs_properties_get(props, "socket_port"), visible)
         OBS.obs_property_set_visible(OBS.obs_properties_get(props, "socket_poll"), visible)
@@ -1286,7 +1285,7 @@ function on_settings_modified(props, prop, settings)
     elseif name == "keep_shape" then
         on_transform_update()
     elseif name == "debug_logs" then
-        if OBS.obs_data_get_bool(settings, "debug_logs") then
+        if OBS.obs_data_get_bool(obs_settings_obj, "debug_logs") then
             log_current_settings()
         end
     end
